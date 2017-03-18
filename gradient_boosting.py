@@ -7,14 +7,17 @@ import theano
 import scipy
 
 
-def main():
+def get_data():
     diabetes = load_diabetes()
     X, y = (diabetes[key] for key in ('data', 'target'))
-    X_train, X_test, y_train, y_test = train_test_split(
+
+    return train_test_split(
         X, y,
         test_size=0.10
     )
 
+
+def baseline_params_and_pred(X, y):
     tuned_params = {
         'criterion': ['mse', 'mae'],
         'splitter': ['best', 'random'],
@@ -29,9 +32,11 @@ def main():
         cv=5,
         n_jobs=4
     )
-    clf.fit(X_train, y_train)
-    weak_learner_params = clf.best_params_
+    clf.fit(X, y)
+    return clf.best_params_, clf.predict(X)
 
+
+def get_error_and_res_functions():
     y_true = T.vector()
     y_pred = T.vector()
     mse = ((y_true - y_pred) ** 2).mean()
@@ -39,9 +44,32 @@ def main():
         [y_pred, y_true],
         mse
     )
+    residuals = -T.grad(mse, y_pred)
+    res_fun = theano.function(
+        [y_pred, y_true],
+        residuals
+    )
+    return mse_fun, res_fun
+
+
+def ens_predict(X_train, models, coeffs):
+    pred_all = [
+        models[i](X_train) * coeffs[i]
+        for i in range(len(models))
+    ]
+    return np.sum(np.vstack(pred_all), axis=0)
+
+
+def main():
+    X_train, X_test, y_train, y_test = get_data()
+
+    weak_learner_params, baseline_pred = baseline_params_and_pred(
+        X_train, y_train
+    )
+    mse_fun, res_fun = get_error_and_res_functions()
     print(
         'MSE for baseline {:.2f}'.format(
-            float(mse_fun(clf.predict(X_train), y_train))
+            float(mse_fun(baseline_pred, y_train))
         )
     )
 
@@ -50,21 +78,11 @@ def main():
 
     models = [f_zero]
     coeffs = [1.]
-    pred_all = [
-        models[i](X_train) * coeffs[i]
-        for i in range(len(models))
-    ]
-    pred_ens = np.sum(np.vstack(pred_all), axis=0)
+    pred_ens = ens_predict(X_train, models, coeffs)
     print(
-        'MSE for 0-th boosting round {:.2f}'.format(
+        'MSE for 0th boosting round {:.2f}'.format(
             float(mse_fun(pred_ens, y_train))
         )
-    )
-
-    residuals = -T.grad(mse, y_pred)
-    res_fun = theano.function(
-        [y_pred, y_true],
-        residuals
     )
 
     # Adding one model.
@@ -74,10 +92,11 @@ def main():
         **weak_learner_params
     ).fit(X_train, res_vals)
 
+    pred_ens = ens_predict(X_train, models, coeffs)
     new_gamma = scipy.optimize.brent(
         lambda coeff: mse_fun(
             y_train,
-            f_zero(X_train) + coeff * f_1.predict(X_train)
+            pred_ens + coeff * f_1.predict(X_train)
         )
     )
 
@@ -85,11 +104,7 @@ def main():
     coeffs.append(new_gamma)
 
     # Get the ensemble prediction.
-    pred_all = [
-        models[i](X_train) * coeffs[i]
-        for i in range(len(models))
-    ]
-    pred_ens = np.sum(np.vstack(pred_all), axis=0)
+    pred_ens = ens_predict(X_train, models, coeffs)
     print(
         'MSE for 1st boosting round {:.2f}'.format(
             float(mse_fun(pred_ens, y_train))
@@ -111,17 +126,34 @@ def main():
 
     models.append(f_2.predict)
     coeffs.append(new_gamma)
-    pred_all = [
-        models[i](X_train) * coeffs[i]
-        for i in range(len(models))
-    ]
-    pred_ens = np.sum(np.vstack(pred_all), axis=0)
+    pred_ens = ens_predict(X_train, models, coeffs)
     print(
         'MSE for 2nd boosting round {:.2f}'.format(
             float(mse_fun(pred_ens, y_train))
         )
     )
-    print(coeffs)
+
+    # And the next.
+    res_3 = res_fun(pred_ens, y_train)
+    f_3 = DecisionTreeRegressor(
+        **weak_learner_params
+    ).fit(X_train, res_3)
+
+    new_gamma = scipy.optimize.brent(
+        lambda coeff: mse_fun(
+            y_train,
+            pred_ens + coeff * f_3.predict(X_train)
+        )
+    )
+
+    models.append(f_3.predict)
+    coeffs.append(new_gamma)
+    pred_ens = ens_predict(X_train, models, coeffs)
+    print(
+        'MSE for 3rd boosting round {:.2f}'.format(
+            float(mse_fun(pred_ens, y_train))
+        )
+    )
 
 
 if __name__ == '__main__':
