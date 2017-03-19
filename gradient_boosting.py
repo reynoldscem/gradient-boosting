@@ -11,13 +11,20 @@ def get_data():
     diabetes = load_diabetes()
     X, y = (diabetes[key] for key in ('data', 'target'))
 
-    return train_test_split(
+    X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=0.10
     )
 
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train, y_train,
+        test_size=0.10
+    )
 
-def baseline_params_and_pred(X, y):
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def get_baseline(X, y):
     tuned_params = {
         'criterion': ['mse', 'mae'],
         'splitter': ['best', 'random'],
@@ -33,7 +40,7 @@ def baseline_params_and_pred(X, y):
         n_jobs=4
     )
     clf.fit(X, y)
-    return clf.best_params_, clf.predict(X)
+    return clf.best_params_, clf
 
 
 def get_error_and_res_functions():
@@ -61,15 +68,28 @@ def ens_predict(X_train, models, coeffs):
 
 
 def main():
-    X_train, X_test, y_train, y_test = get_data()
+    max_rounds = 200
+    eps = 1e-2
+    v = 0.05
 
-    weak_learner_params, baseline_pred = baseline_params_and_pred(
+    X_train, X_val, X_test, y_train, y_val, y_test = get_data()
+
+    weak_learner_params, baseline_clf = get_baseline(
         X_train, y_train
     )
+
+    baseline_pred_train = baseline_clf.predict(X_train)
+    baseline_pred_val = baseline_clf.predict(X_val)
+
     mse_fun, res_fun = get_error_and_res_functions()
     print(
-        'MSE for baseline {:.2f}'.format(
-            float(mse_fun(baseline_pred, y_train))
+        'Train MSE for baseline {:.2f}'.format(
+            float(mse_fun(baseline_pred_train, y_train))
+        )
+    )
+    print(
+        'Val MSE for baseline {:.2f}'.format(
+            float(mse_fun(baseline_pred_val, y_val))
         )
     )
 
@@ -78,82 +98,73 @@ def main():
 
     models = [f_zero]
     coeffs = [1.]
-    pred_ens = ens_predict(X_train, models, coeffs)
+    pred_ens_train = ens_predict(X_train, models, coeffs)
+    pred_ens_val = ens_predict(X_val, models, coeffs)
+    train_mse_for_round = float(mse_fun(pred_ens_train, y_train))
+    val_mse_for_round = float(mse_fun(pred_ens_val, y_val))
     print(
-        'MSE for 0th boosting round {:.2f}'.format(
-            float(mse_fun(pred_ens, y_train))
+        'Train MSE for boosting round #{} {:.2f}'.format(
+            0,
+            train_mse_for_round
         )
     )
-
-    # Adding one model.
-    res_vals = res_fun(f_zero(X_train), y_train)
-
-    f_1 = DecisionTreeRegressor(
-        **weak_learner_params
-    ).fit(X_train, res_vals)
-
-    pred_ens = ens_predict(X_train, models, coeffs)
-    new_gamma = scipy.optimize.brent(
-        lambda coeff: mse_fun(
-            y_train,
-            pred_ens + coeff * f_1.predict(X_train)
-        )
-    )
-
-    models.append(f_1.predict)
-    coeffs.append(new_gamma)
-
-    # Get the ensemble prediction.
-    pred_ens = ens_predict(X_train, models, coeffs)
     print(
-        'MSE for 1st boosting round {:.2f}'.format(
-            float(mse_fun(pred_ens, y_train))
+        'Val for boosting round #{} {:.2f}'.format(
+            0,
+            val_mse_for_round
         )
     )
 
-    # And the next.
-    res_2 = res_fun(pred_ens, y_train)
-    f_2 = DecisionTreeRegressor(
-        **weak_learner_params
-    ).fit(X_train, res_2)
+    train_errors = [train_mse_for_round]
+    val_errors = [val_mse_for_round]
 
-    new_gamma = scipy.optimize.brent(
-        lambda coeff: mse_fun(
-            y_train,
-            pred_ens + coeff * f_2.predict(X_train)
+    for boosting_round in range(1, max_rounds + 1):
+        res_vals = res_fun(pred_ens_train, y_train)
+
+        new_model = DecisionTreeRegressor(
+            **weak_learner_params
+        ).fit(X_train, res_vals)
+
+        pred_ens = ens_predict(X_train, models, coeffs)
+        new_gamma = scipy.optimize.brent(
+            lambda coeff: mse_fun(
+                y_train,
+                pred_ens + coeff * new_model.predict(X_train)
+            )
         )
-    )
 
-    models.append(f_2.predict)
-    coeffs.append(new_gamma)
-    pred_ens = ens_predict(X_train, models, coeffs)
-    print(
-        'MSE for 2nd boosting round {:.2f}'.format(
-            float(mse_fun(pred_ens, y_train))
+        models.append(new_model.predict)
+        coeffs.append(new_gamma * v)
+
+        # Get the ensemble prediction.
+        pred_ens_train = ens_predict(X_train, models, coeffs)
+        pred_ens_val = ens_predict(X_val, models, coeffs)
+        train_mse_for_round = float(mse_fun(pred_ens_train, y_train))
+        val_mse_for_round = float(mse_fun(pred_ens_val, y_val))
+        print(
+            'Train MSE for boosting round #{} {:.2f}'.format(
+                boosting_round,
+                train_mse_for_round
+            )
         )
-    )
-
-    # And the next.
-    res_3 = res_fun(pred_ens, y_train)
-    f_3 = DecisionTreeRegressor(
-        **weak_learner_params
-    ).fit(X_train, res_3)
-
-    new_gamma = scipy.optimize.brent(
-        lambda coeff: mse_fun(
-            y_train,
-            pred_ens + coeff * f_3.predict(X_train)
+        print(
+            'Val MSE for boosting round #{} {:.2f}'.format(
+                boosting_round,
+                val_mse_for_round
+            )
         )
-    )
+        train_errors.append(train_mse_for_round)
+        val_errors.append(val_mse_for_round)
+        if train_mse_for_round < eps:
+            print('Fit training data.')
+            break
 
-    models.append(f_3.predict)
-    coeffs.append(new_gamma)
-    pred_ens = ens_predict(X_train, models, coeffs)
-    print(
-        'MSE for 3rd boosting round {:.2f}'.format(
-            float(mse_fun(pred_ens, y_train))
-        )
-    )
+    from matplotlib import pyplot as plt
+    # plt.figure()
+    plt.plot(list(range(0, len(train_errors))), train_errors, label='train')
+    plt.plot(list(range(0, len(val_errors))), val_errors, label='val')
+    plt.legend()
+    plt.show()
 
 
 if __name__ == '__main__':
